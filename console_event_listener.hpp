@@ -25,15 +25,6 @@
 #include <sys/types.h>
 
 namespace cel {
-    enum class special_key : std::uint8_t {
-        f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12,
-        escape, tab, backspace, enter, left, up, right, down
-    };
-    struct key_flag {
-        enum : std::uint8_t {
-            ctrl = 1, alt = 1 << 1, shift = 1 << 2
-        };
-    };
     enum class result_code : std::uint8_t {
         success,
         no_bytes_read,
@@ -42,6 +33,15 @@ namespace cel {
         failed_to_setup_file_descriptor_pipeline,
         failed_on_waiting_for_event,
         failed_to_read_event
+    };
+    enum class special_key : std::uint8_t {
+        f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12,
+        escape, tab, backspace, enter, left, up, right, down
+    };
+    struct key_flag {
+        enum : std::uint8_t {
+            ctrl = 1, alt = 1 << 1, shift = 1 << 2
+        };
     };
     struct console_event_listener {
     private:
@@ -61,6 +61,88 @@ namespace cel {
                 return std::optional<termios>{l_termios};
             }
         }
+        template <typename tp_type_t>
+        auto constexpr static has_fully_defined_on_regular_key = requires(
+            tp_type_t&&  p_object,
+            char         p_key,
+            std::uint8_t p_modifiers
+        ) {
+            std::forward<tp_type_t>(p_object).on_regular_key(
+                p_key,
+                p_modifiers
+            );
+        };
+        template <typename tp_type_t>
+        auto constexpr static has_partially_defined_on_regular_key = requires(
+            tp_type_t&&  p_object,
+            char         p_key
+        ) {
+            std::forward<tp_type_t>(p_object).on_regular_key(p_key);
+        };
+        template <typename tp_type_t>
+        auto constexpr static has_fully_defined_on_special_key = requires(
+            tp_type_t&&  p_object,
+            special_key  p_key,
+            std::uint8_t p_modifiers
+        ) {
+            std::forward<tp_type_t>(p_object).on_special_key(
+                p_key,
+                p_modifiers
+            );
+        };
+        template <typename tp_type_t>
+        auto constexpr static has_partially_defined_on_special_key = requires(
+            tp_type_t&&  p_object,
+            special_key  p_key
+        ) {
+            std::forward<tp_type_t>(p_object).on_special_key(p_key);
+        };
+        template <typename tp_type_t>
+        auto constexpr static has_defined_on_notification = requires(
+            tp_type_t&&  p_object,
+            std::uint8_t p_notification
+        ) {
+            std::forward<tp_type_t>(p_object).on_notification(p_notification);
+        };
+        template <typename tp_type_t>
+        auto constexpr static has_defined_after_any_event_handled = requires(tp_type_t&& p_object) {
+            std::forward<tp_type_t>(p_object).after_any_event_handled();
+        };
+
+        template <typename tp_type_t>
+        auto constexpr static are_defined_callbacks_noexcept = [] {
+            return [] {
+                if constexpr (has_fully_defined_on_regular_key<tp_type_t>)
+                    return noexcept(std::declval<tp_type_t>().on_regular_key(
+                        char{},
+                        std::uint8_t{}
+                    ));
+                else if constexpr (has_partially_defined_on_regular_key<tp_type_t>)
+                    return noexcept(std::declval<tp_type_t>().on_regular_key(char{}));
+                else return true;
+            }() &&
+            [] {
+                if constexpr (has_fully_defined_on_special_key<tp_type_t>)
+                    return noexcept(std::declval<tp_type_t>().on_special_key(
+                        special_key{},
+                        std::uint8_t{}
+                    ));
+                else if constexpr (has_partially_defined_on_special_key<tp_type_t>)
+                    return noexcept(std::declval<tp_type_t>().on_special_key(special_key{}));
+                else return true;
+            }() &&
+            [] {
+                if constexpr (has_defined_on_notification<tp_type_t>)
+                    return noexcept(std::declval<tp_type_t>().on_notification(std::uint8_t{}));
+                else return true;
+            }() &&
+            [] {
+                if constexpr (has_defined_after_any_event_handled<tp_type_t>)
+                    return noexcept(std::declval<tp_type_t>().after_any_event_handled());
+                else return true;
+            }();
+        }();
+        
     protected:
         auto notify[[nodiscard]](std::uint8_t p_notificiation) const noexcept -> bool {
             return write(
@@ -80,50 +162,11 @@ namespace cel {
             this tp_self_t&& p_self,
             tp_predicate_t&& p_predicate
         )
-        noexcept(noexcept(std::is_nothrow_invocable_v<tp_predicate_t>))
+        noexcept(
+            std::is_nothrow_invocable_v<tp_predicate_t> &&
+            are_defined_callbacks_noexcept<tp_self_t>
+        )
         -> result_code {
-            auto constexpr static has_fully_defined_on_regular_key = requires(
-                tp_self_t&&  p_object,
-                char         p_key,
-                std::uint8_t p_modifiers
-            ) {
-                std::forward<tp_self_t>(p_object).on_regular_key(
-                    p_key,
-                    p_modifiers
-                );
-            };
-            auto constexpr static has_partially_defined_on_regular_key = requires(
-                tp_self_t&&  p_object,
-                char         p_key
-            ) {
-                std::forward<tp_self_t>(p_object).on_regular_key(p_key);
-            };
-            auto constexpr static has_fully_defined_on_special_key = requires(
-                tp_self_t&&  p_object,
-                special_key  p_key,
-                std::uint8_t p_modifiers
-            ) {
-                std::forward<tp_self_t>(p_object).on_special_key(
-                    p_key,
-                    p_modifiers
-                );
-            };
-            auto constexpr static has_partially_defined_on_special_key = requires(
-                tp_self_t&&  p_object,
-                special_key  p_key
-            ) {
-                std::forward<tp_self_t>(p_object).on_special_key(p_key);
-            };
-            auto constexpr static has_defined_on_notification = requires(
-                tp_self_t&&  p_object,
-                std::uint8_t p_notification
-            ) {
-                std::forward<tp_self_t>(p_object).on_notification(p_notification);
-            };
-            auto constexpr static has_defined_after_any_event_handled = requires(tp_self_t&& p_object) {
-                std::forward<tp_self_t>(p_object).after_any_event_handled();
-            };
-
             auto l_terminal_state = set_terminal_attributes();
             if (!l_terminal_state)
                 return result_code::failed_to_set_terminal_attributes;
@@ -141,7 +184,7 @@ namespace cel {
                     auto l_notification = std::uint8_t{0};
                     if (read(p_self.m_fd_pipe[0], std::addressof(l_notification), 1) == -1)
                         return result_code::failed_to_read_event;
-                    if constexpr (has_defined_on_notification)
+                    if constexpr (has_defined_on_notification<tp_self_t>)
                         std::forward<tp_self_t>(p_self).on_notification(l_notification);
                     if (l_notification == 0)
                         break;
@@ -161,27 +204,27 @@ namespace cel {
                         return result_code::no_bytes_read;
 
                     auto on_regular_key = [&](auto p_key){
-                        if constexpr (has_fully_defined_on_regular_key) {
+                        if constexpr (has_fully_defined_on_regular_key<tp_self_t>) {
                             std::forward<tp_self_t>(p_self).on_regular_key(
                                 p_key,
                                 l_flags
                             );
                             l_any_event_callback_invoked = true;
                         }
-                        else if constexpr (has_partially_defined_on_regular_key) {
+                        else if constexpr (has_partially_defined_on_regular_key<tp_self_t>) {
                             std::forward<tp_self_t>(p_self).on_regular_key(p_key);
                             l_any_event_callback_invoked = true;
                         }
                     };
                     auto on_special_key = [&](auto p_key){
-                        if constexpr (has_fully_defined_on_special_key) {
+                        if constexpr (has_fully_defined_on_special_key<tp_self_t>) {
                             std::forward<tp_self_t>(p_self).on_special_key(
                                 p_key,
                                 l_flags
                             );
                             l_any_event_callback_invoked = true;
                         }
-                        else if constexpr (has_partially_defined_on_special_key) {
+                        else if constexpr (has_partially_defined_on_special_key<tp_self_t>) {
                             std::forward<tp_self_t>(p_self).on_special_key(p_key);
                             l_any_event_callback_invoked = true;
                         }
@@ -257,7 +300,7 @@ namespace cel {
                         }
                     }
                 }
-                if constexpr (has_defined_after_any_event_handled)
+                if constexpr (has_defined_after_any_event_handled<tp_self_t>)
                     if (l_any_event_callback_invoked)
                         std::forward<tp_self_t>(p_self).after_any_event_handled();
             }
