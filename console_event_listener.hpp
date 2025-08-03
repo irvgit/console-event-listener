@@ -54,11 +54,12 @@ namespace cel {
             else {
                 auto l_termios = termios{};
                 if (tcgetattr(STDIN_FILENO, std::addressof(l_termios)) != 0)
-                    return std::optional<termios>{std::nullopt};;
-                l_termios.c_lflag &= static_cast<decltype(l_termios.c_lflag)>(~(ICANON | ECHO));
+                    return std::optional<termios>{};
+                auto l_termios_old = l_termios;
+                l_termios.c_lflag &= ~static_cast<decltype(l_termios.c_lflag)>(ICANON | ECHO);
                 if (tcsetattr(STDIN_FILENO, TCSANOW, std::addressof(l_termios)) != 0)
-                    return std::optional<termios>{std::nullopt};
-                return std::optional<termios>{l_termios};
+                    return std::optional<termios>{};
+                return std::optional<termios>{l_termios_old};
             }
         }
         template <typename tp_type_t>
