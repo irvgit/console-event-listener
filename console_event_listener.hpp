@@ -120,6 +120,9 @@ namespace cel {
             ) {
                 std::forward<tp_self_t>(p_object).on_notification(p_notification);
             };
+            auto constexpr static has_defined_after_any_event_handled = requires(tp_self_t&& p_object) {
+                std::forward<tp_self_t>(p_object).after_any_event_handled();
+            };
 
             auto l_terminal_state = set_terminal_attributes();
             if (!l_terminal_state)
@@ -131,6 +134,7 @@ namespace cel {
                 pollfd{ .fd = p_self.m_fd_pipe[0], .events = POLLIN, .revents = {}}
             };
             while (std::invoke(p_predicate)) {
+                auto l_any_event_callback_invoked = false;
                 if (poll(std::ranges::data(l_fd_poll), 2, -1) == -1)
                     return result_code::failed_on_waiting_for_event;
                 if (l_fd_poll[1].revents & POLLIN) {
@@ -157,22 +161,30 @@ namespace cel {
                         return result_code::no_bytes_read;
 
                     auto on_regular_key = [&](auto p_key){
-                        if constexpr (has_fully_defined_on_regular_key)
+                        if constexpr (has_fully_defined_on_regular_key) {
                             std::forward<tp_self_t>(p_self).on_regular_key(
                                 p_key,
                                 l_flags
                             );
-                        else if constexpr (has_partially_defined_on_regular_key)
+                            l_any_event_callback_invoked = true;
+                        }
+                        else if constexpr (has_partially_defined_on_regular_key) {
                             std::forward<tp_self_t>(p_self).on_regular_key(p_key);
+                            l_any_event_callback_invoked = true;
+                        }
                     };
                     auto on_special_key = [&](auto p_key){
-                        if constexpr (has_fully_defined_on_special_key)
+                        if constexpr (has_fully_defined_on_special_key) {
                             std::forward<tp_self_t>(p_self).on_special_key(
                                 p_key,
                                 l_flags
                             );
-                        else if constexpr (has_partially_defined_on_special_key)
+                            l_any_event_callback_invoked = true;
+                        }
+                        else if constexpr (has_partially_defined_on_special_key) {
                             std::forward<tp_self_t>(p_self).on_special_key(p_key);
+                            l_any_event_callback_invoked = true;
+                        }
                     };
                     auto bitor_shift_flag_if_upper = [&]() {
                         if (std::isalpha(l_key) && std::toupper(l_key) == l_key)
@@ -245,6 +257,9 @@ namespace cel {
                         }
                     }
                 }
+                if constexpr (has_defined_after_any_event_handled)
+                    if (l_any_event_callback_invoked)
+                        std::forward<tp_self_t>(p_self).after_any_event_handled();
             }
             if (!set_terminal_attributes(*l_terminal_state))
                 return result_code::failed_to_reset_terminal_attributes;
