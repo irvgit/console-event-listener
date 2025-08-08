@@ -22,6 +22,8 @@
 #include <poll.h>
 #include <termios.h>
 #include <sys/ioctl.h>
+#include <signal.h>
+#include <sys/signalfd.h>
 #include <sys/types.h>
 
 namespace cel {
@@ -31,6 +33,7 @@ namespace cel {
         failed_to_set_terminal_attributes,
         failed_to_reset_terminal_attributes,
         failed_to_setup_file_descriptor_pipeline,
+        failed_to_setup_resize_event,
         failed_on_waiting_for_event,
         failed_to_read_event
     };
@@ -48,16 +51,16 @@ namespace cel {
         std::array<std::int32_t, 2> m_fd_pipe;
         auto static set_terminal_attributes(auto... p_state) noexcept -> std::optional<termios> {
             if constexpr (sizeof...(p_state)) {
-                tcsetattr(STDIN_FILENO, TCSANOW, std::addressof(p_state...[0]));
+                ::tcsetattr(STDIN_FILENO, TCSANOW, std::addressof(p_state...[0]));
                 return std::optional<termios>{p_state...[0]};                
             }
             else {
                 auto l_termios = termios{};
-                if (tcgetattr(STDIN_FILENO, std::addressof(l_termios)) != 0)
+                if (::tcgetattr(STDIN_FILENO, std::addressof(l_termios)) != 0)
                     return std::optional<termios>{};
                 auto l_termios_old = l_termios;
                 l_termios.c_lflag &= ~static_cast<decltype(l_termios.c_lflag)>(ICANON | ECHO);
-                if (tcsetattr(STDIN_FILENO, TCSANOW, std::addressof(l_termios)) != 0)
+                if (::tcsetattr(STDIN_FILENO, TCSANOW, std::addressof(l_termios)) != 0)
                     return std::optional<termios>{};
                 return std::optional<termios>{l_termios_old};
             }
@@ -109,6 +112,17 @@ namespace cel {
         auto constexpr static has_defined_after_any_event_handled = requires(tp_type_t&& p_object) {
             std::forward<tp_type_t>(p_object).after_any_event_handled();
         };
+        template <typename tp_type_t>
+        auto constexpr static has_defined_on_resize = requires(
+            tp_type_t&& p_object,
+            std::size_t p_width,
+            std::size_t p_height
+        ) {
+            std::forward<tp_type_t>(p_object).on_resize(
+                p_width,
+                p_height
+            );
+        };
 
         template <typename tp_type_t>
         auto constexpr static are_defined_callbacks_noexcept = [] {
@@ -141,12 +155,33 @@ namespace cel {
                 if constexpr (has_defined_after_any_event_handled<tp_type_t>)
                     return noexcept(std::declval<tp_type_t>().after_any_event_handled());
                 else return true;
+            }() &&
+            [] {
+                if constexpr (has_defined_on_resize<tp_type_t>)
+                    return noexcept(std::declval<tp_type_t>().on_resize(
+                        std::size_t{},
+                        std::size_t{}
+                    ));
+                else return true;
             }();
         }();
-        
+        struct size {
+            std::size_t m_width;
+            std::size_t m_height;
+        };
     protected:
+        auto get_size[[nodiscard]]() const noexcept -> std::optional<size> {
+            auto l_window_size = winsize{};
+            if (ioctl(STDOUT_FILENO, TIOCGWINSZ, std::addressof(l_window_size)) == -1)
+                std::optional<size>{};
+            return std::optional<size>{
+                std::in_place,
+                l_window_size.ws_col,
+                l_window_size.ws_col
+            };
+        }
         auto notify[[nodiscard]](std::uint8_t p_notificiation) const noexcept -> bool {
-            return write(
+            return ::write(
                 m_fd_pipe[1],
                 static_cast<std::add_pointer_t<void>>(std::addressof(p_notificiation)),
                 1
@@ -171,30 +206,70 @@ namespace cel {
             auto l_terminal_state = set_terminal_attributes();
             if (!l_terminal_state)
                 return result_code::failed_to_set_terminal_attributes;
-            if (pipe(std::ranges::data(p_self.m_fd_pipe)) == -1)
+            if (::pipe(std::ranges::data(p_self.m_fd_pipe)) == -1)
                 return result_code::failed_to_setup_file_descriptor_pipeline;
-            auto l_fd_poll = std::array<pollfd, 2>{
+
+            auto l_mask = sigset_t{};
+            if (
+                ::sigemptyset(std::addressof(l_mask)) == -1 ||
+                ::sigaddset(std::addressof(l_mask), SIGWINCH) == -1 ||
+                ::sigprocmask(SIG_BLOCK, std::addressof(l_mask), nullptr) == -1
+            ) return result_code::failed_to_setup_resize_event;
+            auto const l_resize_signal_fd = ::signalfd(-1, std::addressof(l_mask), SFD_CLOEXEC);
+
+            struct l_descriptor_closer {
+                std::int32_t m_descriptor;
+                ~l_descriptor_closer() noexcept { ::close(m_descriptor); }
+            };
+            auto const _ = l_descriptor_closer{l_resize_signal_fd};
+            auto const _ = l_descriptor_closer{p_self.m_fd_pipe[0]};
+            auto const _ = l_descriptor_closer{p_self.m_fd_pipe[1]};
+
+            if (l_resize_signal_fd == -1)
+                return result_code::failed_to_setup_resize_event;
+
+            auto l_fd_poll = std::array<pollfd, 3>{
                 pollfd{ .fd = STDIN_FILENO,        .events = POLLIN, .revents = {}},
-                pollfd{ .fd = p_self.m_fd_pipe[0], .events = POLLIN, .revents = {}}
+                pollfd{ .fd = p_self.m_fd_pipe[0], .events = POLLIN, .revents = {}},
+                pollfd{ .fd = l_resize_signal_fd,  .events = POLLIN, .revents = {}}
             };
             while (std::invoke(p_predicate)) {
                 auto l_any_event_callback_invoked = false;
-                if (poll(std::ranges::data(l_fd_poll), 2, -1) == -1)
+                if (::poll(std::ranges::data(l_fd_poll), std::ranges::size(l_fd_poll), -1) == -1)
                     return result_code::failed_on_waiting_for_event;
                 if (l_fd_poll[1].revents & POLLIN) {
                     auto l_notification = std::uint8_t{0};
-                    if (read(p_self.m_fd_pipe[0], std::addressof(l_notification), 1) == -1)
+                    if (::read(p_self.m_fd_pipe[0], std::addressof(l_notification), 1) == -1)
                         return result_code::failed_to_read_event;
                     if constexpr (has_defined_on_notification<tp_self_t>)
                         std::forward<tp_self_t>(p_self).on_notification(l_notification);
                     if (l_notification == 0)
                         break;
                 }
+                if (l_fd_poll[2].revents & POLLIN) {
+                    auto l_signalfd_siginfo = signalfd_siginfo{};
+                    ::read(
+                        l_resize_signal_fd,
+                        std::addressof(l_signalfd_siginfo),
+                        sizeof(l_signalfd_siginfo)
+                    ); 
+                    auto l_window_size = winsize{};
+                    ::ioctl(
+                        STDOUT_FILENO,
+                        TIOCGWINSZ,
+                        std::addressof(l_window_size)
+                    );
+                    if constexpr (has_defined_on_resize<tp_self_t>)
+                        std::forward<tp_self_t>(p_self).on_resize(
+                            l_window_size.ws_col,
+                            l_window_size.ws_row
+                        );
+                }
                 if (l_fd_poll[0].revents & POLLIN) {
                     auto l_key        = char{0};
                     auto l_flags      = std::uint8_t{0};
                     auto l_bytes      = std::array<char, 6>{};
-                    auto const l_bytes_read = read(
+                    auto const l_bytes_read = ::read(
                         STDIN_FILENO,
                         static_cast<void*>(std::ranges::data(l_bytes)),
                         std::ranges::size(l_bytes)
